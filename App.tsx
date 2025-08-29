@@ -20,6 +20,11 @@ const createDeck = (): CardType[] => {
       deck.push({ type: config.type, id: `mod-${config.type}-${i}` });
     }
   });
+  DECK_COMPOSITION.BONUS_CARDS.forEach(config => {
+    for (let i = 0; i < config.count; i++) {
+      deck.push({ type: CardFaceType.Bonus, value: config.value, id: `bonus-${config.value}-${i}` });
+    }
+  });
   return deck;
 };
 
@@ -112,6 +117,9 @@ const processSingleCardDraw = (
         result.isFlipThree = true;
         message = `${player.name} drew Flip Three! Drawing 3 more cards...`;
         break;
+      case CardFaceType.Bonus:
+        message = `${player.name} drew a +${drawnCard.value} Bonus card!`;
+        break;
     }
     
     return { newPlayers, result, message };
@@ -178,7 +186,10 @@ const App: React.FC = () => {
       }
       
       const numberCards = player.hand.filter(c => c.type === CardFaceType.Number);
+      const bonusCards = player.hand.filter(c => c.type === CardFaceType.Bonus);
+      
       let bankedScore = numberCards.reduce((sum, card) => sum + (card.value || 0), 0);
+      bankedScore += bonusCards.reduce((sum, card) => sum + (card.value || 0), 0);
       
       if (numberCards.length >= FLIP_7_CARD_COUNT) {
          bankedScore += FLIP_7_BONUS;
@@ -375,7 +386,16 @@ const App: React.FC = () => {
 
   const currentPlayer = useMemo(() => players[currentPlayerIndex], [players, currentPlayerIndex]);
   const numberCardsInCurrentHand = useMemo(() => currentPlayer?.hand.filter(c => c.type === CardFaceType.Number) ?? [], [currentPlayer]);
-  const currentRoundScore = useMemo(() => numberCardsInCurrentHand.reduce((sum, card) => sum + (card.value || 0), 0), [numberCardsInCurrentHand]);
+  const currentRoundScore = useMemo(() => {
+    if (!currentPlayer) return 0;
+    return currentPlayer.hand.reduce((sum, card) => {
+      if (card.type === CardFaceType.Number || card.type === CardFaceType.Bonus) {
+        return sum + (card.value || 0);
+      }
+      return sum;
+    }, 0);
+  }, [currentPlayer]);
+  
   const canHit = deck.length > 0 || discardPile.length > 0;
 
   if (gameState === GameState.Setup) {

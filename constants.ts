@@ -27,6 +27,13 @@ export const DECK_COMPOSITION = {
   ],
   MODIFIER_CARDS: [
     { type: CardFaceType.Double, count: 1 },
+  ],
+  BONUS_CARDS: [
+    { type: CardFaceType.Bonus, value: 2, count: 1 },
+    { type: CardFaceType.Bonus, value: 4, count: 1 },
+    { type: CardFaceType.Bonus, value: 6, count: 1 },
+    { type: CardFaceType.Bonus, value: 8, count: 1 },
+    { type: CardFaceType.Bonus, value: 10, count: 1 },
   ]
 };
 

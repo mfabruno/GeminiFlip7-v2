@@ -4,11 +4,12 @@ export enum CardFaceType {
   Double,
   FlipThree,
   Stop,
+  Bonus,
 }
 
 export interface Card {
   type: CardFaceType;
-  value?: number; // Only for Number cards
+  value?: number; // For Number and Bonus cards
   id: string;
 }
 

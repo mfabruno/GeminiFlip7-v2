@@ -64,6 +64,13 @@ const Card: React.FC<CardProps> = ({ card, isFaceDown = false, className = '', s
             <span className="text-lg leading-tight">Stop</span>
           </div>
         );
+      case CardFaceType.Bonus:
+        return (
+          <div className="w-full h-full bg-orange-500 text-white rounded-lg flex flex-col items-center justify-center p-2 font-bold">
+            <div className="text-5xl mb-2">+{card.value}</div>
+            <span className="text-lg leading-tight">Bonus</span>
+          </div>
+        );
       default:
         return null;
     }
