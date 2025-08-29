@@ -37,94 +37,6 @@ const shuffleDeck = (deck: CardType[]): CardType[] => {
   return shuffled;
 };
 
-const processSingleCardDraw = (
-    drawnCard: CardType,
-    currentPlayers: Player[],
-    currentPlayerIdx: number
-  ): { 
-      newPlayers: Player[]; 
-      result: { shouldEndTurn: boolean; shouldEndRound: boolean; isFlipThree: boolean; isBust: boolean };
-      message: string;
-    } => {
-    
-    const newPlayers = JSON.parse(JSON.stringify(currentPlayers));
-    const player = newPlayers[currentPlayerIdx];
-    let result = { shouldEndTurn: false, shouldEndRound: false, isFlipThree: false, isBust: false };
-    let message = '';
-    
-    player.hand.push(drawnCard);
-
-    switch (drawnCard.type) {
-      case CardFaceType.Number: {
-        message = `${player.name} drew a ${drawnCard.value}.`;
-        const numberCards = player.hand.filter((c: CardType) => c.type === CardFaceType.Number);
-        const isDuplicate = numberCards.filter((c: CardType) => c.value === drawnCard.value).length > 1;
-
-        if (isDuplicate) {
-          if (player.hasSecondChance) {
-            player.hasSecondChance = false;
-            // Find and remove the drawn duplicate card
-            const duplicateCardIndex = player.hand.findLastIndex((c: CardType) => c.id === drawnCard.id);
-            if(duplicateCardIndex > -1) player.hand.splice(duplicateCardIndex, 1);
-            
-            // Find and remove the Second Chance card
-            const scIndex = player.hand.findIndex((c: CardType) => c.type === CardFaceType.SecondChance);
-            if (scIndex > -1) player.hand.splice(scIndex, 1);
-            message = `${player.name} drew a duplicate ${drawnCard.value} but was saved by Second Chance!`;
-          } else {
-            player.isBusted = true;
-            result.shouldEndTurn = true;
-            result.isBust = true;
-            message = `${player.name} drew a duplicate ${drawnCard.value} and BUSTED!`;
-          }
-        } else if (numberCards.length >= FLIP_7_CARD_COUNT) {
-            result.shouldEndRound = true;
-            message = `${player.name} got a Flip 7!`;
-        }
-        break;
-      }
-      case CardFaceType.SecondChance: {
-        if (player.hasSecondChance) {
-          player.hand.pop(); // Remove the second chance card from the current player's hand
-          let given = false;
-          for (let i = 1; i < newPlayers.length; i++) {
-            const targetIndex = (currentPlayerIdx + i) % newPlayers.length;
-            if (!newPlayers[targetIndex].hasSecondChance) {
-              newPlayers[targetIndex].hand.push(drawnCard);
-              newPlayers[targetIndex].hasSecondChance = true;
-              message = `${player.name} already had a Second Chance, so they gave the new one to ${newPlayers[targetIndex].name}.`;
-              given = true;
-              break;
-            }
-          }
-          if (!given) message = `${player.name} drew an extra Second Chance, but everyone already has one. It was discarded.`;
-        } else {
-          player.hasSecondChance = true;
-          message = `${player.name} got a Second Chance card!`;
-        }
-        break;
-      }
-      case CardFaceType.Stop:
-        player.isStaying = true;
-        result.shouldEndTurn = true;
-        message = `${player.name} drew a Stop card and must end their turn.`;
-        break;
-      case CardFaceType.Double:
-        player.hasDoubleModifier = true;
-        message = `${player.name} got a Double Score card!`;
-        break;
-      case CardFaceType.FlipThree:
-        result.isFlipThree = true;
-        message = `${player.name} drew Flip Three! Drawing 3 more cards...`;
-        break;
-      case CardFaceType.Bonus:
-        message = `${player.name} drew a +${drawnCard.value} Bonus card!`;
-        break;
-    }
-    
-    return { newPlayers, result, message };
-};
-
 
 const App: React.FC = () => {
   const [deck, setDeck] = useState<CardType[]>([]);
@@ -138,6 +50,9 @@ const App: React.FC = () => {
   const [roundMessage, setRoundMessage] = useState('');
   const [winner, setWinner] = useState<Player | null>(null);
   const [gameLog, setGameLog] = useState<string[]>([]);
+  
+  // State for resolving action cards
+  const [actionToResolve, setActionToResolve] = useState<{ card: CardType; fromPlayerId: number; } | null>(null);
 
   const logAction = useCallback((message: string) => {
     if (!message) return;
@@ -153,6 +68,7 @@ const App: React.FC = () => {
     setGameLog([]);
     setDeck([]);
     setDiscardPile([]);
+    setActionToResolve(null);
   }, []);
 
   const startGame = () => {
@@ -165,239 +81,364 @@ const App: React.FC = () => {
       hasDoubleModifier: false,
       isStaying: false,
       isBusted: false,
+      actionQueue: [],
     }));
     setPlayers(initialPlayers);
     setDeck(shuffleDeck(createDeck()));
     setDiscardPile([]);
     setCurrentPlayerIndex(0);
-    setGameState(GameState.PlayerTurn);
+    setGameState(GameState.PlayerTurn); // Go directly to the first player's turn
     setGameLog([`Game started with ${numPlayers} players.`]);
+    logAction(`It's ${initialPlayers[0].name}'s turn to start the round.`);
   };
 
-  const handleEndRound = useCallback((finalPlayersState: Player[]) => {
+  const calculateRoundScore = (player: Player) => {
+      if (player.isBusted) return 0;
+
+      const numberCards = player.hand.filter(c => c.type === CardFaceType.Number);
+      const bonusCards = player.hand.filter(c => c.type === CardFaceType.Bonus);
+
+      const numberScore = numberCards.reduce((sum, card) => sum + (card.value || 0), 0);
+      const bonusScore = bonusCards.reduce((sum, card) => sum + (card.value || 0), 0);
+
+      const doubledNumberScore = player.hasDoubleModifier ? numberScore * 2 : numberScore;
+      
+      let finalScore = doubledNumberScore + bonusScore;
+
+      if (numberCards.length >= FLIP_7_CARD_COUNT) {
+         finalScore += FLIP_7_BONUS;
+      }
+      return finalScore;
+  }
+
+  const handleEndRound = useCallback(() => {
+    setGameState(GameState.RoundOver); // Transition to show scores
     let roundSummary = 'Round over! ';
     let cardsToDiscard: CardType[] = [];
 
-    const updatedPlayers = finalPlayersState.map(player => {
+    const updatedPlayers = players.map(player => {
       cardsToDiscard.push(...player.hand);
+      
+      const bankedScore = calculateRoundScore(player);
+      
       if (player.isBusted) {
-        roundSummary += `${player.name} busted. `;
-        return { ...player };
+        roundSummary += `${player.name} busted (0 points). `;
+      } else {
+        roundSummary += `${player.name} banked ${bankedScore} points. `;
       }
       
-      const numberCards = player.hand.filter(c => c.type === CardFaceType.Number);
-      const bonusCards = player.hand.filter(c => c.type === CardFaceType.Bonus);
-      
-      let bankedScore = numberCards.reduce((sum, card) => sum + (card.value || 0), 0);
-      bankedScore += bonusCards.reduce((sum, card) => sum + (card.value || 0), 0);
-      
-      if (numberCards.length >= FLIP_7_CARD_COUNT) {
-         bankedScore += FLIP_7_BONUS;
-         roundSummary += `${player.name} got a Flip 7! (+${FLIP_7_BONUS} bonus). `;
-      }
-      if (player.hasDoubleModifier) {
-        bankedScore *= 2;
-        roundSummary += `Their score is doubled! `;
-      }
-
-      roundSummary += `${player.name} banked ${bankedScore} points. `;
       return { ...player, totalScore: player.totalScore + bankedScore };
     });
-
+    
     logAction(roundSummary);
     setDiscardPile(prev => [...prev, ...cardsToDiscard]);
 
-    const potentialWinner = updatedPlayers.find(p => p.totalScore >= GAME_WIN_SCORE);
-
-    setPlayers(updatedPlayers);
-    setRoundMessage(roundSummary);
+    const maxScore = Math.max(...updatedPlayers.map(p => p.totalScore));
     
-    if (potentialWinner) {
-      const gameWinner = updatedPlayers.reduce((best, current) => current.totalScore > best.totalScore ? current : best);
-      setWinner(gameWinner);
-      setGameState(GameState.GameOver);
-      logAction(`${gameWinner.name} wins the game with a score of ${gameWinner.totalScore}!`);
+    if (maxScore >= GAME_WIN_SCORE) {
+        const potentialWinners = updatedPlayers.filter(p => p.totalScore === maxScore);
+        if (potentialWinners.length === 1) {
+            setWinner(potentialWinners[0]);
+            setGameState(GameState.GameOver);
+            logAction(`${potentialWinners[0].name} wins with ${maxScore} points!`);
+        } else {
+            logAction(`Tie at ${maxScore}! Playing another round to break the tie.`);
+            setRoundMessage(roundSummary + ` Tie at ${maxScore}! One more round!`);
+            setPlayers(updatedPlayers);
+        }
     } else {
-      setGameState(GameState.RoundOver);
+       setRoundMessage(roundSummary);
+       setPlayers(updatedPlayers);
     }
-  }, [logAction]);
+  }, [players, logAction]);
 
   const startNewRound = useCallback(() => {
-    setPlayers(prevPlayers => prevPlayers.map(p => ({
+    const updatedPlayers = players.map(p => ({
       ...p,
       hand: [],
       hasSecondChance: false,
       hasDoubleModifier: false,
       isStaying: false,
       isBusted: false,
-    })));
+      actionQueue: [],
+    }));
+    setPlayers(updatedPlayers);
     setRoundMessage('');
+    setActionMessage('');
     setWinner(null);
-    const nextDealerIndex = 0; // Simplified for now, can be rotated
+    const nextDealerIndex = 0; 
     setCurrentPlayerIndex(nextDealerIndex);
-    setGameState(GameState.PlayerTurn);
-    logAction('Starting a new round.');
-  }, [logAction]);
+    setGameState(GameState.PlayerTurn); // Start next round directly with a player's turn
+    logAction(`Starting a new round. It's ${updatedPlayers[0].name}'s turn.`);
+  }, [players, logAction]);
 
-  const nextTurn = useCallback((currentPlayersState: Player[]) => {
+  const nextTurn = useCallback(() => {
+    setActionMessage('');
     let nextPlayerIndex = currentPlayerIndex;
     let checkedCount = 0;
     
+    const activePlayers = players.filter(p => !p.isBusted && !p.isStaying);
+    if (activePlayers.length === 0) {
+        handleEndRound();
+        return;
+    }
+    
     do {
-      nextPlayerIndex = (nextPlayerIndex + 1) % currentPlayersState.length;
+      nextPlayerIndex = (nextPlayerIndex + 1) % players.length;
       checkedCount++;
     } while (
-        (currentPlayersState[nextPlayerIndex]?.isBusted || currentPlayersState[nextPlayerIndex]?.isStaying) &&
-        checkedCount < currentPlayersState.length
+        (players[nextPlayerIndex]?.isBusted || players[nextPlayerIndex]?.isStaying) &&
+        checkedCount < players.length * 2
     );
     
-    const allPlayersDone = currentPlayersState.every(p => p.isBusted || p.isStaying);
+    setCurrentPlayerIndex(nextPlayerIndex);
+    setGameState(GameState.PlayerTurn);
+    logAction(`It's ${players[nextPlayerIndex].name}'s turn.`);
 
-    if (allPlayersDone) {
-      handleEndRound(currentPlayersState);
-    } else {
-      setCurrentPlayerIndex(nextPlayerIndex);
-      logAction(`It's ${currentPlayersState[nextPlayerIndex].name}'s turn.`);
+  }, [currentPlayerIndex, players, handleEndRound, logAction]);
+
+  const drawCard = useCallback(async (currentDeck: CardType[], currentDiscard: CardType[]) => {
+      let deck = [...currentDeck];
+      let discard = [...currentDiscard];
+      if (deck.length === 0) {
+        if (discard.length === 0) {
+          logAction("No cards left to draw!");
+          return { drawnCard: null, newDeck: deck, newDiscard: discard };
+        }
+        logAction("Deck is empty. Shuffling discard pile...");
+        await new Promise(r => setTimeout(r, 500));
+        deck = shuffleDeck(discard);
+        discard = [];
+      }
+      const drawnCard = deck.pop()!;
+      return { drawnCard, newDeck: deck, newDiscard: discard };
+  }, [logAction]);
+
+  const processHit = (card: CardType, p: Player, isFlipThreeContext = false) => {
+    let message = '';
+    let shouldEndTurn = false;
+    let shouldEndRound = false;
+    let isBust = false;
+    let cardsToDiscard: CardType[] = [];
+    let pendingAction: CardType | null = null;
+    let needsActionResolution = false;
+    
+    const player = JSON.parse(JSON.stringify(p));
+
+    switch (card.type) {
+        case CardFaceType.Number: {
+            message = `${player.name} drew a ${card.value}.`;
+            const numberCardsInHand = player.hand.filter((c: CardType) => c.type === CardFaceType.Number);
+            const isDuplicate = numberCardsInHand.some((c: CardType) => c.value === card.value);
+            
+            if (isDuplicate) {
+                if (player.hasSecondChance) {
+                    player.hasSecondChance = false;
+                    const scIndex = player.hand.findIndex((c: CardType) => c.type === CardFaceType.SecondChance);
+                    if (scIndex > -1) {
+                        cardsToDiscard.push(player.hand.splice(scIndex, 1)[0]);
+                    }
+                    cardsToDiscard.push(card);
+                    shouldEndTurn = true; // Case 5
+                    message = `${player.name} used a Second Chance on a duplicate ${card.value}! Their turn is over.`;
+                } else {
+                    player.hand.push(card); // Add card to show what they busted on
+                    player.isBusted = true;
+                    shouldEndTurn = true;
+                    isBust = true;
+                    message = `${player.name} BUSTED with a duplicate ${card.value}!`;
+                }
+            } else {
+                 player.hand.push(card);
+                 const currentNumberCards = player.hand.filter((c: CardType) => c.type === CardFaceType.Number);
+                 if (currentNumberCards.length >= FLIP_7_CARD_COUNT) {
+                    shouldEndRound = true;
+                    message = `${player.name} got a Flip 7!`;
+                }
+            }
+            break;
+        }
+        case CardFaceType.SecondChance:
+            player.hand.push(card);
+            if (player.hasSecondChance) {
+                 // TODO: Immediately assign to another active player or discard
+                 message = `${player.name} drew a second Second Chance card!`
+            } else {
+                player.hasSecondChance = true;
+                message = `${player.name} got a Second Chance!`;
+            }
+            break;
+        case CardFaceType.FlipThree:
+        case CardFaceType.Stop:
+            if (isFlipThreeContext) {
+                pendingAction = card;
+                message = `${player.name} drew a ${card.type === CardFaceType.FlipThree ? "Flip Three" : "Stop"} card; it's set aside.`;
+            } else {
+               needsActionResolution = true;
+            }
+            break;
+        case CardFaceType.Double:
+            player.hand.push(card);
+            player.hasDoubleModifier = true;
+            message = `${player.name} got a Double Score card!`;
+            break;
+        case CardFaceType.Bonus:
+            player.hand.push(card);
+            message = `${player.name} drew a +${card.value} Bonus card!`;
+            break;
     }
-  }, [currentPlayerIndex, handleEndRound, logAction]);
+    return { player, message, shouldEndTurn, shouldEndRound, isBust, cardsToDiscard, pendingAction, needsActionResolution };
+  };
 
   const handleHit = async () => {
-    if (gameState !== GameState.PlayerTurn || isProcessingAction) return;
-    
-    let currentDeck = [...deck];
-    let currentDiscardPile = [...discardPile];
-    
-    if (currentDeck.length === 0) {
-      if (currentDiscardPile.length === 0) {
-        setActionMessage("No cards left in deck or discard pile!");
-        return;
-      }
-      logAction("Deck is empty. Shuffling discard pile...");
-      await new Promise(r => setTimeout(r, 500));
-      currentDeck = shuffleDeck(currentDiscardPile);
-      currentDiscardPile = [];
-      setDeck(currentDeck);
-      setDiscardPile([]);
-    }
-
+    if (isProcessingAction) return;
     setIsProcessingAction(true);
     setActionMessage('');
 
-    let currentPlayersState = players;
+    const { drawnCard, newDeck, newDiscard } = await drawCard(deck, discardPile);
+    setDeck(newDeck);
+    setDiscardPile(newDiscard);
 
-    const drawCardAndUpdate = (d: CardType[], p: Player[]) => {
-        const drawnCard = d.pop()!;
-        const { newPlayers, result, message } = processSingleCardDraw(drawnCard, p, currentPlayerIndex);
-        
-        if(message) {
-          setActionMessage(message);
-          logAction(message);
-        }
-
-        setPlayers(newPlayers);
-        setDeck(d);
-        return { updatedPlayers: newPlayers, result, updatedDeck: d };
-    };
-
-    let roundEnded = false;
-    let turnEnded = false;
-    let wasBust = false;
-
-    // --- First Draw ---
-    const { updatedPlayers: playersAfterFirst, result: firstResult, updatedDeck: deckAfterFirst } = drawCardAndUpdate(currentDeck, currentPlayersState);
-    currentPlayersState = playersAfterFirst;
-    currentDeck = deckAfterFirst;
-    
-    if (firstResult.shouldEndRound) {
-        roundEnded = true;
-    } else if (firstResult.shouldEndTurn) {
-        turnEnded = true;
-        wasBust = firstResult.isBust;
-    }
-
-    // --- Flip Three Sequence ---
-    if (firstResult.isFlipThree && !roundEnded && !turnEnded) {
-        await new Promise(r => setTimeout(r, 1200));
-
-        for (let i = 0; i < 3; i++) {
-            if (currentDeck.length === 0) {
-                if(currentDiscardPile.length > 0) {
-                  logAction("Deck ran out during Flip Three. Shuffling discard pile...");
-                  await new Promise(r => setTimeout(r, 500));
-                  currentDeck = shuffleDeck(currentDiscardPile);
-                  currentDiscardPile = [];
-                  setDeck(currentDeck);
-                  setDiscardPile([]);
-                } else {
-                   const emptyDeckMsg = 'Deck is empty!';
-                   setActionMessage(emptyDeckMsg);
-                   logAction(emptyDeckMsg);
-                   await new Promise(r => setTimeout(r, 1500));
-                   turnEnded = true; // End turn if no more cards can be drawn
-                   break;
-                }
-            }
-
-            await new Promise(r => setTimeout(r, 1000));
-
-            const { updatedPlayers: playersAfterFlip, result: flipResult, updatedDeck: deckAfterFlip } = drawCardAndUpdate(currentDeck, currentPlayersState);
-            currentPlayersState = playersAfterFlip;
-            currentDeck = deckAfterFlip;
-
-            if (flipResult.shouldEndRound) {
-                roundEnded = true;
-                break;
-            }
-            if (flipResult.shouldEndTurn) {
-                turnEnded = true;
-                wasBust = flipResult.isBust;
-                break;
-            }
-        }
-    }
-
-    // --- Finalize Turn/Round ---
-    if (roundEnded) {
-        handleEndRound(currentPlayersState);
-    } else if (turnEnded) {
-        if(wasBust) {
-            await new Promise(r => setTimeout(r, 1500));
-        }
-        nextTurn(currentPlayersState);
+    if (!drawnCard) {
+        setIsProcessingAction(false);
+        return;
     }
     
+    const currentPlayer = players[currentPlayerIndex];
+    const initialProcess = processHit(drawnCard, currentPlayer);
+
+    if(initialProcess.needsActionResolution) {
+        const cardName = drawnCard.type === CardFaceType.FlipThree ? "Flip Three" : "Stop";
+        const message = `${currentPlayer.name} drew a ${cardName}.`;
+        logAction(message);
+        setActionMessage(message);
+        setActionToResolve({ card: drawnCard, fromPlayerId: currentPlayer.id });
+        setGameState(GameState.ActionResolution);
+        setIsProcessingAction(false);
+        return;
+    }
+    
+    logAction(initialProcess.message);
+    setActionMessage(initialProcess.message);
+    
+    setPlayers(prev => prev.map(p => p.id === initialProcess.player.id ? initialProcess.player : p));
+    setDiscardPile(prev => [...prev, ...initialProcess.cardsToDiscard]);
+
+    if (initialProcess.shouldEndRound) {
+        handleEndRound();
+    } else if (initialProcess.shouldEndTurn) {
+        if(initialProcess.isBust) { await new Promise(r => setTimeout(r, 1500)); }
+        nextTurn();
+    }
+
     setIsProcessingAction(false);
   };
   
   const handleStay = () => {
-    if (gameState !== GameState.PlayerTurn || isProcessingAction) return;
+    if (isProcessingAction) return;
     setActionMessage('');
-    const stayMessage = `${players[currentPlayerIndex].name} chose to stay.`;
-    logAction(stayMessage);
+    logAction(`${players[currentPlayerIndex].name} chose to stay.`);
 
-    setPlayers(prev => {
-        const newPlayers = JSON.parse(JSON.stringify(prev));
-        newPlayers[currentPlayerIndex].isStaying = true;
-        setActionMessage(`${newPlayers[currentPlayerIndex].name} is staying.`);
-        nextTurn(newPlayers);
-        return newPlayers;
-    });
+    const newPlayers = [...players];
+    newPlayers[currentPlayerIndex].isStaying = true;
+    setPlayers(newPlayers);
+    
+    nextTurn();
   };
 
-  const currentPlayer = useMemo(() => players[currentPlayerIndex], [players, currentPlayerIndex]);
-  const numberCardsInCurrentHand = useMemo(() => currentPlayer?.hand.filter(c => c.type === CardFaceType.Number) ?? [], [currentPlayer]);
-  const currentRoundScore = useMemo(() => {
-    if (!currentPlayer) return 0;
-    return currentPlayer.hand.reduce((sum, card) => {
-      if (card.type === CardFaceType.Number || card.type === CardFaceType.Bonus) {
-        return sum + (card.value || 0);
-      }
-      return sum;
-    }, 0);
-  }, [currentPlayer]);
-  
-  const canHit = deck.length > 0 || discardPile.length > 0;
+  const executeFlipThree = async (targetPlayerId: number) => {
+    setIsProcessingAction(true);
+    const targetPlayerName = players.find(p => p.id === targetPlayerId)?.name || 'A player';
+    logAction(`--- ${targetPlayerName} starts a Flip Three! ---`);
 
+    let currentDeck = [...deck];
+    let currentDiscard = [...discardPile];
+    let pendingActions: CardType[] = [];
+    let stopSequence = false;
+
+    for (let i = 0; i < 3; i++) {
+        if (stopSequence) break;
+
+        await new Promise(r => setTimeout(r, 1000));
+
+        const drawResult = await drawCard(currentDeck, currentDiscard);
+        currentDeck = drawResult.newDeck;
+        currentDiscard = drawResult.newDiscard;
+
+        if (!drawResult.drawnCard) {
+            logAction("Ran out of cards during Flip Three.");
+            break;
+        }
+
+        let targetPlayer!: Player;
+        setPlayers(prev => {
+            targetPlayer = JSON.parse(JSON.stringify(prev.find(p => p.id === targetPlayerId)!));
+            return prev;
+        });
+
+        const processResult = processHit(drawResult.drawnCard, targetPlayer, true);
+
+        setPlayers(prev => prev.map(p => p.id === processResult.player.id ? processResult.player : p));
+        setActionMessage(processResult.message);
+        logAction(processResult.message);
+        currentDiscard = [...currentDiscard, ...processResult.cardsToDiscard];
+
+        if (processResult.pendingAction) {
+            pendingActions.push(processResult.pendingAction);
+        }
+
+        if (processResult.shouldEndRound || processResult.isBust) {
+            stopSequence = true;
+            if (processResult.shouldEndRound) {
+                setTimeout(handleEndRound, 500);
+            }
+             if (processResult.isBust) {
+                await new Promise(r => setTimeout(r, 1500));
+            }
+        }
+    }
+    
+    setDeck(currentDeck);
+    setDiscardPile(currentDiscard);
+
+    if (pendingActions.length > 0 && !stopSequence) {
+        logAction(`${targetPlayerName} has pending actions to resolve.`);
+        // Note: this part of the logic (chained actions) is complex and would need a queue system.
+        // For now, we'll log them and they will be discarded at round end.
+    }
+
+    logAction(`--- ${targetPlayerName}'s Flip Three is complete. ---`);
+    setIsProcessingAction(false);
+  };
+  
+  const handleAssignAction = async (targetPlayerId: number) => {
+    if (!actionToResolve) return;
+    const { card, fromPlayerId } = actionToResolve;
+    
+    const assignerName = players.find(p => p.id === fromPlayerId)?.name || 'A player';
+    const targetName = players.find(p => p.id === targetPlayerId)?.name || 'another player';
+
+    logAction(`${assignerName} assigned a ${card.type === CardFaceType.FlipThree ? "Flip Three" : "Stop"} to ${targetName}.`);
+    
+    setDiscardPile(prev => [...prev, card]);
+    setActionToResolve(null);
+    
+    if (card.type === CardFaceType.Stop) {
+        setPlayers(prev => {
+            return prev.map(p => p.id === targetPlayerId ? {...p, isStaying: true} : p);
+        });
+        logAction(`${targetName} is now frozen for the round.`);
+    } else if (card.type === CardFaceType.FlipThree) {
+        await executeFlipThree(targetPlayerId);
+    }
+    
+    nextTurn();
+  }
+
+  const currentPlayer = useMemo(() => players[currentPlayerIndex], [players, currentPlayerIndex]);
+  const activePlayers = useMemo(() => players.filter(p => !p.isBusted && !p.isStaying), [players]);
+  const currentRoundScore = useMemo(() => currentPlayer ? calculateRoundScore(currentPlayer) : 0, [currentPlayer]);
+  
   if (gameState === GameState.Setup) {
       return (
         <main className="min-h-screen w-full bg-cover bg-center flex flex-col justify-center items-center p-4 sm:p-6" style={{backgroundImage: 'radial-gradient(circle, #166534, #14532d, #103b22, #052e16)'}}>
@@ -406,16 +447,10 @@ const App: React.FC = () => {
               <div className="mb-6">
                   <label htmlFor="numPlayers" className="text-xl mr-4">Number of Players:</label>
                   <select id="numPlayers" value={numPlayers} onChange={e => setNumPlayers(parseInt(e.target.value, 10))} className="bg-slate-800 text-white p-2 rounded-lg text-lg">
-                      <option value="2">2</option>
-                      <option value="3">3</option>
-                      <option value="4">4</option>
-                      <option value="5">5</option>
-                      <option value="6">6</option>
+                      <option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option>
                   </select>
               </div>
-              <button onClick={startGame} className="px-8 py-4 text-xl font-bold rounded-lg shadow-lg transition-transform transform hover:scale-105 bg-green-500 hover:bg-green-600 text-white">
-                Start Game
-              </button>
+              <button onClick={startGame} className="px-8 py-4 text-xl font-bold rounded-lg shadow-lg transition-transform transform hover:scale-105 bg-green-500 hover:bg-green-600 text-white">Start Game</button>
           </div>
         </main>
       );
@@ -423,25 +458,44 @@ const App: React.FC = () => {
 
   const renderEndScreen = () => {
       const isGameOver = gameState === GameState.GameOver;
+      const nextAction = isGameOver ? resetGame : startNewRound;
       return (
         <div className="absolute inset-0 bg-black bg-opacity-80 flex flex-col justify-center items-center z-20 animate-fade-in text-center p-4">
           <h2 className={`text-5xl sm:text-6xl font-extrabold ${isGameOver ? 'text-green-400' : 'text-yellow-400'}`}>{isGameOver ? `${winner?.name} Wins!` : 'Round Over'}</h2>
           <p className="text-lg sm:text-xl mt-4 max-w-2xl">{roundMessage}</p>
           <div className="mt-6 space-y-2">
-            {players.map(p => (
-              <p key={p.id} className="text-xl"><span className="font-bold">{p.name}'s Score:</span> {p.totalScore}</p>
-            ))}
+            {players.map(p => (<p key={p.id} className="text-xl"><span className="font-bold">{p.name}'s Score:</span> {p.totalScore}</p>))}
           </div>
-          <button onClick={isGameOver ? resetGame : startNewRound} className="px-6 py-3 text-lg font-bold rounded-lg shadow-lg transition-transform transform hover:scale-105 bg-yellow-500 hover:bg-yellow-600 text-black mt-8">
+          <button onClick={nextAction} className="px-6 py-3 text-lg font-bold rounded-lg shadow-lg transition-transform transform hover:scale-105 bg-yellow-500 hover:bg-yellow-600 text-black mt-8">
             {isGameOver ? 'Play Again' : 'Next Round'}
           </button>
         </div>
       );
   }
+  
+  const renderActionResolver = () => {
+    if (!actionToResolve) return null;
+    const assigner = players.find(p => p.id === actionToResolve.fromPlayerId);
+    return (
+        <div className="absolute inset-0 bg-black bg-opacity-80 flex flex-col justify-center items-center z-20 animate-fade-in text-center p-4">
+            <h2 className="text-3xl font-bold mb-4">{assigner?.name}, assign this card:</h2>
+            <Card card={actionToResolve.card} />
+            <p className="text-lg my-4">Choose a player:</p>
+            <div className="flex flex-wrap gap-4 justify-center">
+              {players.map(player => (
+                <button key={player.id} onClick={() => handleAssignAction(player.id)} className="px-6 py-3 text-lg font-bold rounded-lg shadow-lg transition-transform transform hover:scale-105 bg-blue-500 hover:bg-blue-600 text-white">
+                    {player.name}
+                </button>
+              ))}
+            </div>
+        </div>
+    );
+  }
 
   return (
     <main className="min-h-screen w-full bg-cover bg-center flex flex-col lg:flex-row items-start p-2 sm:p-4" style={{backgroundImage: 'radial-gradient(circle, #166534, #14532d, #103b22, #052e16)'}}>
        {(gameState === GameState.RoundOver || gameState === GameState.GameOver) && renderEndScreen()}
+       {gameState === GameState.ActionResolution && renderActionResolver()}
       
        <div className="flex-grow w-full lg:w-auto flex flex-col items-center">
         <header className="w-full max-w-7xl grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2 p-4 bg-black bg-opacity-20 rounded-lg shadow-xl mb-4">
@@ -457,7 +511,7 @@ const App: React.FC = () => {
           ))}
         </header>
         
-        {currentPlayer && gameState === GameState.PlayerTurn && <div className="relative flex-grow w-full max-w-5xl flex flex-col justify-center items-center">
+        {currentPlayer && <div className="relative flex-grow w-full max-w-5xl flex flex-col justify-center items-center">
             <div className="w-full flex flex-col items-center animate-fade-in">
               <div className="h-8 mb-2 text-yellow-300 text-center font-semibold text-lg">{actionMessage}</div>
               <div className="h-44 sm:h-48 mb-4 flex items-center justify-center p-2 min-w-full">
@@ -478,8 +532,8 @@ const App: React.FC = () => {
               </div>
 
               <div className="flex space-x-4">
-                <button onClick={handleHit} disabled={isProcessingAction || gameState !== GameState.PlayerTurn || !canHit} className="px-6 py-3 text-lg font-bold rounded-lg shadow-lg transition-transform transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:scale-100 bg-blue-500 hover:bg-blue-600 text-white">Hit</button>
-                <button onClick={handleStay} disabled={isProcessingAction || gameState !== GameState.PlayerTurn || numberCardsInCurrentHand.length === 0} className="px-6 py-3 text-lg font-bold rounded-lg shadow-lg transition-transform transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:scale-100 bg-red-500 hover:bg-red-600 text-white">Stay</button>
+                <button onClick={handleHit} disabled={isProcessingAction || gameState !== GameState.PlayerTurn} className="px-6 py-3 text-lg font-bold rounded-lg shadow-lg transition-transform transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:scale-100 bg-blue-500 hover:bg-blue-600 text-white">Hit</button>
+                <button onClick={handleStay} disabled={isProcessingAction || gameState !== GameState.PlayerTurn} className="px-6 py-3 text-lg font-bold rounded-lg shadow-lg transition-transform transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:scale-100 bg-red-500 hover:bg-red-600 text-white">Stay</button>
               </div>
             </div>
         </div>}

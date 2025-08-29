@@ -22,11 +22,13 @@ export interface Player {
   hasDoubleModifier: boolean;
   isStaying: boolean;
   isBusted: boolean;
+  actionQueue: Card[]; // For pending actions like Flip 3 or Stop
 }
 
 export enum GameState {
   Setup,
   PlayerTurn,
+  ActionResolution, // New state for assigning action cards
   RoundOver,
   GameOver,
 }
