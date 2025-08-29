@@ -6,6 +6,7 @@ export const FLIP_7_CARD_COUNT = 7;
 
 export const DECK_COMPOSITION = {
   NUMBER_CARDS: [
+    { value: 0, count: 1 },
     { value: 1, count: 1 },
     { value: 2, count: 2 },
     { value: 3, count: 3 },
