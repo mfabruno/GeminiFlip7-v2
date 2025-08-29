@@ -1,0 +1,5 @@
+{
+  "name": "Flip 7 Card Game",
+  "description": "A web-based card game inspired by Flip 7. Flip cards one by one, trying not to exceed a total of 7. Stop at any time to bank your cards. If you go over 7, you bust! Try to get the highest score.",
+  "requestFramePermissions": []
+}
