@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Card as CardType, GameState, CardFaceType, Player } from './types';
 import { GAME_WIN_SCORE, FLIP_7_BONUS, FLIP_7_CARD_COUNT, DECK_COMPOSITION } from './constants';
@@ -50,6 +51,7 @@ const App: React.FC = () => {
   const [roundMessage, setRoundMessage] = useState('');
   const [winner, setWinner] = useState<Player | null>(null);
   const [gameLog, setGameLog] = useState<string[]>([]);
+  const [showNextTurnButton, setShowNextTurnButton] = useState(false);
   
   // State for resolving action cards
   const [actionToResolve, setActionToResolve] = useState<{ card: CardType; fromPlayerId: number; } | null>(null);
@@ -111,12 +113,12 @@ const App: React.FC = () => {
       return finalScore;
   }
 
-  const handleEndRound = useCallback(() => {
+  const handleEndRound = useCallback((finalPlayersState: Player[]) => {
     setGameState(GameState.RoundOver); // Transition to show scores
     let roundSummary = 'Round over! ';
     let cardsToDiscard: CardType[] = [];
 
-    const updatedPlayers = players.map(player => {
+    const scoredPlayers = finalPlayersState.map(player => {
       cardsToDiscard.push(...player.hand);
       
       const bankedScore = calculateRoundScore(player);
@@ -133,10 +135,10 @@ const App: React.FC = () => {
     logAction(roundSummary);
     setDiscardPile(prev => [...prev, ...cardsToDiscard]);
 
-    const maxScore = Math.max(...updatedPlayers.map(p => p.totalScore));
+    const maxScore = Math.max(...scoredPlayers.map(p => p.totalScore));
     
     if (maxScore >= GAME_WIN_SCORE) {
-        const potentialWinners = updatedPlayers.filter(p => p.totalScore === maxScore);
+        const potentialWinners = scoredPlayers.filter(p => p.totalScore === maxScore);
         if (potentialWinners.length === 1) {
             setWinner(potentialWinners[0]);
             setGameState(GameState.GameOver);
@@ -144,13 +146,13 @@ const App: React.FC = () => {
         } else {
             logAction(`Tie at ${maxScore}! Playing another round to break the tie.`);
             setRoundMessage(roundSummary + ` Tie at ${maxScore}! One more round!`);
-            setPlayers(updatedPlayers);
+            setPlayers(scoredPlayers);
         }
     } else {
        setRoundMessage(roundSummary);
-       setPlayers(updatedPlayers);
+       setPlayers(scoredPlayers);
     }
-  }, [players, logAction]);
+  }, [logAction]);
 
   const startNewRound = useCallback(() => {
     const updatedPlayers = players.map(p => ({
@@ -177,7 +179,7 @@ const App: React.FC = () => {
     
     const activePlayers = updatedPlayers.filter(p => !p.isBusted && !p.isStaying);
     if (activePlayers.length === 0) {
-        handleEndRound();
+        handleEndRound(updatedPlayers);
         return;
     }
     
@@ -296,67 +298,20 @@ const App: React.FC = () => {
 
       return { updatedPlayer: newPlayer, cardsToDiscard, message, needsActionResolution, shouldEndRound };
   }, []);
-
-  const handleHit = async () => {
-    if (isProcessingAction) return;
-    setIsProcessingAction(true);
-    setActionMessage('');
-
-    const { drawnCard, newDeck, newDiscard } = await drawCard(deck, discardPile);
-    setDeck(newDeck);
-    setDiscardPile(newDiscard);
-
-    if (!drawnCard) {
+  
+  useEffect(() => {
+    if (gameState === GameState.PlayerTurn) {
         setIsProcessingAction(false);
-        return;
+        setShowNextTurnButton(false);
     }
-
-    let player = { ...players[currentPlayerIndex] };
+  }, [currentPlayerIndex, gameState]);
     
-    const { updatedPlayer, cardsToDiscard, message, needsActionResolution, shouldEndRound } = processCardForPlayer(player, drawnCard, false);
+  const handleAssignAction = async (targetPlayerId: number, action?: { card: CardType; fromPlayerId: number; }) => {
+    const actionToUse = action || actionToResolve;
+    if (!actionToUse) return;
 
-    logAction(message);
-    setActionMessage(message);
-
-    const updatedPlayers = players.map(p => p.id === updatedPlayer.id ? updatedPlayer : p);
-    setPlayers(updatedPlayers);
-    setDiscardPile(prev => [...prev, ...cardsToDiscard]);
-    
-    if (needsActionResolution) {
-      setActionToResolve({ card: needsActionResolution, fromPlayerId: updatedPlayer.id });
-      setGameState(GameState.ActionResolution);
-    } else if (shouldEndRound) {
-      await new Promise(r => setTimeout(r, 1500));
-      handleEndRound();
-    } else {
-      await new Promise(r => setTimeout(r, 5000));
-      nextTurn(updatedPlayers);
-    }
-
-    setIsProcessingAction(false);
-  };
-  
-  const handleStay = async () => {
-    if (isProcessingAction) return;
-    setIsProcessingAction(true);
-    
-    const currentPlayerName = players[currentPlayerIndex].name;
-    setActionMessage(`${currentPlayerName} stays.`);
-    logAction(`${currentPlayerName} chose to stay.`);
-  
-    const updatedPlayers = players.map(p => 
-      p.id === currentPlayerIndex ? { ...p, isStaying: true } : p
-    );
-    setPlayers(updatedPlayers);
-    
-    await new Promise(r => setTimeout(r, 5000));
-    nextTurn(updatedPlayers);
-    setIsProcessingAction(false);
-  };
-  
-  const handleAssignAction = async (targetPlayerId: number) => {
-    if (!actionToResolve) return;
-    const { card, fromPlayerId } = actionToResolve;
+    setIsProcessingAction(true); // Lock actions while this resolves
+    const { card, fromPlayerId } = actionToUse;
     
     const assignerName = players.find(p => p.id === fromPlayerId)?.name || 'A player';
     const targetName = players.find(p => p.id === targetPlayerId)?.name || 'another player';
@@ -365,18 +320,15 @@ const App: React.FC = () => {
     logAction(`${assignerName} assigned a ${cardName} to ${targetName}.`);
     
     setActionToResolve(null);
+    let finalPlayers = [...players];
     
     if (card.type === CardFaceType.Stop) {
-        const updatedPlayers = players.map(p => p.id === targetPlayerId ? {...p, isStaying: true} : p);
-        setPlayers(updatedPlayers);
+        finalPlayers = players.map(p => p.id === targetPlayerId ? {...p, isStaying: true} : p);
+        setPlayers(finalPlayers);
         setDiscardPile(prev => [...prev, card]);
         logAction(`${targetName} is now staying and out of the round.`);
-        await new Promise(r => setTimeout(r, 5000));
-        nextTurn(updatedPlayers);
-
     } else if (card.type === CardFaceType.FlipThree) {
         logAction(`${targetName} must now draw 3 cards automatically.`);
-        setIsProcessingAction(true);
         
         let tempDeck = [...deck];
         let tempDiscard = [...discardPile, card];
@@ -413,6 +365,9 @@ const App: React.FC = () => {
             setPlayers(tempPlayers);
 
             if (updatedPlayer.isBusted) {
+                const bustMsg = `${updatedPlayer.name} BUSTED!`;
+                setActionMessage(bustMsg);
+                logAction(bustMsg);
                 await new Promise(r => setTimeout(r, 2500));
                 break;
             }
@@ -421,182 +376,337 @@ const App: React.FC = () => {
                 break;
             }
         }
-        
-        setIsProcessingAction(false);
-        await new Promise(r => setTimeout(r, 5000));
-        nextTurn(tempPlayers);
-
+        finalPlayers = tempPlayers;
     } else if (card.type === CardFaceType.SecondChance) {
-        const updatedPlayers = players.map(p => {
+        finalPlayers = players.map(p => {
           if (p.id === targetPlayerId) {
             return {...p, hasSecondChance: true, hand: [...p.hand, card]};
           }
+          if (p.id === fromPlayerId) {
+            // Remove the second SC from the assigner's hand if it was there
+            const hand = [...p.hand];
+            const scIndex = hand.findIndex(c => c.id === card.id);
+            if (scIndex > -1) hand.splice(scIndex, 1);
+            return {...p, hand};
+          }
           return p;
         });
-        setPlayers(updatedPlayers);
+        setPlayers(finalPlayers);
         logAction(`${targetName} receives a Second Chance.`);
-        await new Promise(r => setTimeout(r, 5000));
-        nextTurn(updatedPlayers);
     }
+
+    await new Promise(r => setTimeout(r, 1500));
+    nextTurn(finalPlayers);
   }
 
+  const handleHit = async () => {
+    if (isProcessingAction) return;
+    setIsProcessingAction(true);
+    setActionMessage('');
+
+    const { drawnCard, newDeck, newDiscard } = await drawCard(deck, discardPile);
+    setDeck(newDeck);
+    setDiscardPile(newDiscard);
+
+    if (!drawnCard) {
+        setIsProcessingAction(false);
+        return;
+    }
+
+    let player = { ...players[currentPlayerIndex] };
+    
+    const { updatedPlayer, cardsToDiscard, message, needsActionResolution, shouldEndRound } = processCardForPlayer(player, drawnCard, false);
+
+    logAction(message);
+    setActionMessage(message);
+
+    let updatedPlayers = players.map(p => p.id === updatedPlayer.id ? updatedPlayer : p);
+    setPlayers(updatedPlayers);
+    setDiscardPile(prev => [...prev, ...cardsToDiscard]);
+    
+    if (needsActionResolution) {
+      const fromPlayerId = updatedPlayer.id;
+      const card = needsActionResolution;
+
+      if (card.type === CardFaceType.SecondChance) {
+          const validTargets = updatedPlayers.filter(p => p.id !== fromPlayerId && !p.isBusted && !p.isStaying && !p.hasSecondChance);
+          if (validTargets.length === 0) {
+              const discardMsg = `${updatedPlayer.name} had no one to give the second Second Chance to. It was discarded.`;
+              logAction(discardMsg);
+              setActionMessage(discardMsg);
+              setDiscardPile(prev => [...prev, card]);
+              // Player's turn is not over, they can act again.
+              setIsProcessingAction(false);
+              return; // Early return from handleHit
+          }
+      } else if (card.type === CardFaceType.FlipThree || card.type === CardFaceType.Stop) {
+          const validTargets = updatedPlayers.filter(p => !p.isBusted && !p.isStaying);
+          const validOtherTargets = validTargets.filter(p => p.id !== fromPlayerId);
+
+          if (validOtherTargets.length === 0 && validTargets.some(p => p.id === fromPlayerId)) {
+              const cardName = card.type === CardFaceType.FlipThree ? "Flip Three" : "Stop";
+              const selfAssignMsg = `${updatedPlayer.name} has no other players to target and must use the ${cardName} on themselves.`;
+              logAction(selfAssignMsg);
+              setActionMessage(selfAssignMsg);
+              await new Promise(r => setTimeout(r, 1500));
+              // Automatically assign to self and skip ActionResolution state.
+              await handleAssignAction(fromPlayerId, { card, fromPlayerId });
+              return;
+          }
+      }
+      
+      setActionToResolve({ card: needsActionResolution, fromPlayerId: updatedPlayer.id });
+      setGameState(GameState.ActionResolution);
+    } else if (shouldEndRound) {
+      await new Promise(r => setTimeout(r, 1500));
+      handleEndRound(updatedPlayers);
+    } else if (updatedPlayer.isBusted) {
+        const bustMsg = `${updatedPlayer.name} BUSTED!`;
+        setActionMessage(bustMsg);
+        logAction(bustMsg);
+        await new Promise(r => setTimeout(r, 2500));
+        nextTurn(updatedPlayers);
+    } else {
+      const activePlayersBesidesCurrent = updatedPlayers.filter(p => p.id !== updatedPlayer.id && !p.isBusted && !p.isStaying);
+      if (activePlayersBesidesCurrent.length > 0) {
+        setShowNextTurnButton(true);
+      } else {
+        // Last player standing, can keep hitting
+        setIsProcessingAction(false);
+      }
+    }
+  };
+  
+  const handleStay = async () => {
+    if (isProcessingAction) return;
+    setIsProcessingAction(true);
+    
+    const currentPlayerName = players[currentPlayerIndex].name;
+    const stayMessage = `${currentPlayerName} stays.`;
+    setActionMessage(stayMessage);
+    logAction(stayMessage);
+  
+    const updatedPlayers = players.map(p => 
+      p.id === currentPlayerIndex ? { ...p, isStaying: true } : p
+    );
+    setPlayers(updatedPlayers);
+    setShowNextTurnButton(true);
+  };
+
+  const handleNextTurnButtonClick = () => {
+    nextTurn(players);
+  };
+
+  const ActionResolver: React.FC = () => {
+    if (!actionToResolve) return null;
+
+    const { card, fromPlayerId } = actionToResolve;
+    const fromPlayer = players.find(p => p.id === fromPlayerId);
+    if (!fromPlayer) return null;
+
+    let validTargets: Player[] = [];
+    
+    if (card.type === CardFaceType.SecondChance) {
+        validTargets = players.filter(p => p.id !== fromPlayerId && !p.isBusted && !p.isStaying && !p.hasSecondChance);
+    } else {
+        validTargets = players.filter(p => !p.isBusted && !p.isStaying);
+    }
+
+    return (
+        <div className="absolute inset-0 bg-black bg-opacity-70 flex justify-center items-center z-50 p-4">
+            <div className="bg-slate-800 p-6 rounded-xl shadow-2xl text-center max-w-md w-full">
+                <h2 className="text-2xl font-bold mb-4">Assign Card</h2>
+                <p className="mb-4">{fromPlayer.name}, you drew this card. Who do you give it to?</p>
+                <div className="flex justify-center mb-6">
+                    <Card card={card} />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                    {validTargets.map(target => (
+                        <button
+                            key={target.id}
+                            onClick={() => handleAssignAction(target.id)}
+                            className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition-transform transform hover:scale-105"
+                        >
+                            {target.name}
+                        </button>
+                    ))}
+                </div>
+            </div>
+        </div>
+    );
+  };
+  
   const currentPlayer = useMemo(() => players[currentPlayerIndex], [players, currentPlayerIndex]);
-  const activePlayers = useMemo(() => players.filter(p => !p.isBusted && !p.isStaying), [players]);
   const currentRoundScore = useMemo(() => currentPlayer ? calculateRoundScore(currentPlayer) : 0, [currentPlayer]);
   
+  const renderPlayerStatus = (player: Player) => {
+    if (player.isBusted) return <span className="text-red-500 font-bold text-lg">BUSTED</span>;
+    if (player.isStaying) return <span className="text-sky-400 font-bold text-lg">STAYING</span>;
+    return <span className="text-green-400 font-bold text-lg">ACTIVE</span>;
+  }
+
   if (gameState === GameState.Setup) {
       return (
-        <main className="min-h-screen w-full bg-cover bg-center flex flex-col justify-center items-center p-4 sm:p-6" style={{backgroundImage: 'radial-gradient(circle, #166534, #14532d, #103b22, #052e16)'}}>
-          <div className="text-center p-8 bg-black bg-opacity-50 rounded-xl flex flex-col items-center animate-fade-in">
-              <h1 className="text-6xl font-extrabold mb-4 text-yellow-300 tracking-wider" style={{fontFamily: 'serif'}}>Flip 7</h1>
-              <div className="mb-6">
-                  <label htmlFor="numPlayers" className="text-xl mr-4">Number of Players:</label>
-                  <select id="numPlayers" value={numPlayers} onChange={e => setNumPlayers(parseInt(e.target.value, 10))} className="bg-slate-800 text-white p-2 rounded-lg text-lg">
-                      <option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option>
-                  </select>
-              </div>
-              <button onClick={startGame} className="px-8 py-4 text-xl font-bold rounded-lg shadow-lg transition-transform transform hover:scale-105 bg-green-500 hover:bg-green-600 text-white">Start Game</button>
-          </div>
+        <main className="min-h-screen w-full bg-cover bg-center flex flex-col justify-center items-center p-4 sm:p-6" style={{ backgroundImage: 'radial-gradient(circle, #1e293b, #0f172a)' }}>
+            <div className="bg-slate-800 bg-opacity-70 p-8 rounded-xl shadow-2xl text-center backdrop-blur-sm">
+            <h1 className="text-6xl font-extrabold mb-2 text-transparent bg-clip-text bg-gradient-to-r from-sky-400 to-blue-600">Flip 7</h1>
+            <p className="text-slate-300 mb-8">How many players?</p>
+            <div className="flex items-center justify-center gap-4 mb-8">
+                <span className="text-2xl font-bold">2</span>
+                <input
+                type="range"
+                min="2"
+                max="8"
+                value={numPlayers}
+                onChange={(e) => setNumPlayers(parseInt(e.target.value))}
+                className="w-48 cursor-pointer"
+                aria-label="Number of players"
+                />
+                <span className="text-2xl font-bold">8</span>
+            </div>
+            <p className="text-4xl font-bold mb-8">{numPlayers}</p>
+            <button
+                onClick={startGame}
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg text-xl transition-transform transform hover:scale-105"
+            >
+                Start Game
+            </button>
+            </div>
         </main>
       );
   }
 
-  const renderEndScreen = () => {
-      const isGameOver = gameState === GameState.GameOver;
-      const nextAction = isGameOver ? resetGame : startNewRound;
-      return (
-        <div className="absolute inset-0 bg-black bg-opacity-80 flex flex-col justify-center items-center z-20 animate-fade-in text-center p-4">
-          <h2 className={`text-5xl sm:text-6xl font-extrabold ${isGameOver ? 'text-green-400' : 'text-yellow-400'}`}>{isGameOver ? `${winner?.name} Wins!` : 'Round Over'}</h2>
-          <p className="text-lg sm:text-xl mt-4 max-w-2xl">{roundMessage}</p>
-          <div className="mt-6 space-y-2">
-            {players.map(p => (<p key={p.id} className="text-xl"><span className="font-bold">{p.name}'s Score:</span> {p.totalScore}</p>))}
-          </div>
-          <button onClick={nextAction} className="px-6 py-3 text-lg font-bold rounded-lg shadow-lg transition-transform transform hover:scale-105 bg-yellow-500 hover:bg-yellow-600 text-black mt-8">
-            {isGameOver ? 'Play Again' : 'Next Round'}
-          </button>
-        </div>
-      );
-  }
-  
-  const ActionResolver: React.FC = () => {
-    if (!actionToResolve) return null;
-    
-    const assigner = players.find(p => p.id === actionToResolve.fromPlayerId);
-    
-    const targetablePlayers = players.filter(player => {
-        if (actionToResolve.card.type === CardFaceType.SecondChance) {
-            // Can't give a Second Chance to someone who already has one, or to yourself (since you drew it).
-            return player.id !== actionToResolve.fromPlayerId && !player.hasSecondChance;
-        }
-        // For Stop and FlipThree, you can target anyone including yourself.
-        return true;
-    });
-
-    useEffect(() => {
-        if (targetablePlayers.length === 0 && actionToResolve) {
-            logAction(`No valid targets for ${actionToResolve.card.type === CardFaceType.SecondChance ? "Second Chance" : "action"}. Card is discarded.`);
-            setDiscardPile(prev => [...prev, actionToResolve.card]);
-            setActionToResolve(null);
-            nextTurn(players);
-        }
-    }, [targetablePlayers, actionToResolve]);
-
-
-    if (targetablePlayers.length === 0) {
-        return (
-            <div className="absolute inset-0 bg-black bg-opacity-80 flex flex-col justify-center items-center z-20 animate-fade-in text-center p-4">
-                <h2 className="text-3xl font-bold mb-4">No Valid Targets!</h2>
-                <p>There are no players who can receive this card. It will be discarded.</p>
-            </div>
-        );
-    }
-
-    return (
-        <div className="absolute inset-0 bg-black bg-opacity-80 flex flex-col justify-center items-center z-20 animate-fade-in text-center p-4">
-            <h2 className="text-3xl font-bold mb-4">{assigner?.name}, assign this card:</h2>
-            <Card card={actionToResolve.card} />
-            <p className="text-lg my-4">Choose a player:</p>
-            <div className="flex flex-wrap gap-4 justify-center">
-              {targetablePlayers.map(player => (
-                <button key={player.id} onClick={() => handleAssignAction(player.id)} className="px-6 py-3 text-lg font-bold rounded-lg shadow-lg transition-transform transform hover:scale-105 bg-blue-500 hover:bg-blue-600 text-white">
-                    {player.name}
-                </button>
-              ))}
-            </div>
-        </div>
-    );
-  }
-
   return (
-    <main className="min-h-screen w-full bg-cover bg-center flex flex-col lg:flex-row items-start p-2 sm:p-4" style={{backgroundImage: 'radial-gradient(circle, #166534, #14532d, #103b22, #052e16)'}}>
-       {(gameState === GameState.RoundOver || gameState === GameState.GameOver) && renderEndScreen()}
-       {gameState === GameState.ActionResolution && <ActionResolver />}
+    <main className="h-screen w-full flex flex-col p-2 sm:p-4 bg-slate-900">
+      <header className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-2">
+        {players.map((player) => (
+          <div key={player.id} className={`p-3 rounded-lg border-2 ${currentPlayerIndex === player.id ? 'border-yellow-400 bg-slate-700' : 'border-slate-600 bg-slate-800'}`}>
+            <h2 className="text-lg font-bold truncate">{player.name}</h2>
+            <p className="text-sm text-slate-300">Score: <span className="font-semibold text-white">{player.totalScore}</span></p>
+            {renderPlayerStatus(player)}
+          </div>
+        ))}
+      </header>
       
-      <div className="w-full lg:w-1/4 p-2 bg-black bg-opacity-40 rounded-lg lg:self-stretch">
-        <h2 className="text-2xl font-bold mb-2 border-b-2 border-green-400 pb-2">Players</h2>
-        <div className="space-y-3">
-          {players.map(player => (
-            <div key={player.id} className={`p-3 rounded-lg transition-all duration-300 ${player.id === currentPlayer?.id && gameState === GameState.PlayerTurn ? 'bg-yellow-500 text-slate-900 scale-105 shadow-lg' : 'bg-slate-800'}`}>
-              <h3 className="text-lg font-bold">{player.name} {player.id === currentPlayer?.id ? '(Current)' : ''}</h3>
-              <p>Score: {player.totalScore}</p>
-              <div className="flex gap-1 mt-1">
-                {player.hasSecondChance && <span title="Second Chance" className="text-xs px-2 py-1 bg-amber-400 text-slate-900 rounded-full font-semibold">🔄</span>}
-                {player.hasDoubleModifier && <span title="Double Score" className="text-xs px-2 py-1 bg-purple-500 text-white rounded-full font-semibold">x2</span>}
-                {player.isStaying && <span title="Staying" className="text-xs px-2 py-1 bg-gray-500 text-white rounded-full font-semibold">Staying</span>}
-                {player.isBusted && <span title="Busted" className="text-xs px-2 py-1 bg-red-600 text-white rounded-full font-semibold">Busted!</span>}
+      <div className="flex-1 grid grid-cols-1 lg:grid-cols-4 gap-4 min-h-0">
+        <aside className="lg:col-span-1 bg-slate-800 rounded-lg p-4 flex flex-col overflow-hidden">
+          {/* Player Info - Non-growing */}
+          <div className="flex-shrink-0">
+            {currentPlayer && (
+              <div>
+                <h3 className="text-xl font-bold mb-2">Current: {currentPlayer.name}</h3>
+                <p>Round Score: <span className="font-bold text-2xl text-yellow-400">{currentRoundScore}</span></p>
+                <div className="flex gap-2 mt-2 flex-wrap">
+                  {currentPlayer.hasSecondChance && <span className="bg-amber-500 text-slate-900 text-xs font-bold px-2 py-1 rounded-full">🔄 2nd Chance</span>}
+                  {currentPlayer.hasDoubleModifier && <span className="bg-purple-500 text-white text-xs font-bold px-2 py-1 rounded-full">x2 Double</span>}
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
-        <div className="mt-4 pt-4 border-t-2 border-green-400">
-            <h3 className="text-xl font-bold mb-2">Game Log</h3>
-            <div className="text-sm space-y-1 h-48 overflow-y-auto pr-2">
-                {gameLog.map((log, i) => <p key={i} className="opacity-80">{log}</p>)}
-            </div>
-        </div>
-      </div>
-
-      <div className="flex-1 flex flex-col items-center justify-center p-4">
-        <div className="flex items-end justify-center mb-6 space-x-4">
-           <div className="flex flex-col items-center">
-             <p className="mb-2 font-semibold">Deck ({deck.length})</p>
-             <Card isFaceDown />
-           </div>
-           <div className="flex flex-col items-center">
-             <p className="mb-2 font-semibold">Discard ({discardPile.length})</p>
-             <Card card={discardPile[discardPile.length - 1]} />
-           </div>
-        </div>
-        
-        {currentPlayer && (
-          <div className="bg-black bg-opacity-40 p-6 rounded-xl w-full max-w-4xl text-center">
-            <h2 className="text-3xl font-bold mb-2">
-                {currentPlayer.name}'s Turn
-            </h2>
-            <p className="text-xl mb-4">Current Round Score: <span className="font-bold text-yellow-300">{currentRoundScore}</span></p>
-
-            <div className="flex justify-center items-center flex-wrap gap-2 min-h-[10.5rem]">
-              {currentPlayer.hand.length === 0 ? <p className="text-slate-400">Hand is empty</p> :
-                currentPlayer.hand.map((card, index) => (
-                  <Card key={card.id} card={card} className="animate-fade-in"/>
-                ))
-              }
-            </div>
-
-            <div className="mt-6 flex flex-col items-center">
-              <div className="flex gap-4">
-                  <button onClick={handleHit} disabled={isProcessingAction} className="px-8 py-3 text-lg font-bold rounded-lg shadow-lg transition-transform transform hover:scale-105 bg-blue-500 hover:bg-blue-600 text-white disabled:bg-slate-500 disabled:cursor-not-allowed">
-                    Hit
-                  </button>
-                  <button onClick={handleStay} disabled={isProcessingAction} className="px-8 py-3 text-lg font-bold rounded-lg shadow-lg transition-transform transform hover:scale-105 bg-gray-500 hover:bg-gray-600 text-white disabled:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50">
-                    Stay
-                  </button>
-              </div>
-               <p className={`mt-4 text-lg min-h-[1.75rem] font-semibold ${actionMessage.includes('BUSTED') ? 'text-red-500 animate-pulse' : 'text-green-300'}`}>{actionMessage}</p>
+            )}
+          </div>
+          
+          {/* Game Log - Growing and scrolling */}
+          <div className="flex flex-col flex-1 min-h-0 mt-4">
+            <h3 className="text-lg font-bold mb-2 flex-shrink-0">Game Log</h3>
+            <div className="flex-1 overflow-y-auto pr-2">
+                <ul className="text-xs text-slate-400 space-y-1">
+                  {gameLog.map((log, i) => <li key={i}>{log}</li>)}
+                </ul>
             </div>
           </div>
-        )}
+        </aside>
+
+        <section className="lg:col-span-3 bg-slate-800/50 rounded-lg p-4 flex flex-col justify-between">
+          <div className="flex justify-center items-center gap-4 sm:gap-8 mb-4">
+            <div className="flex flex-col items-center">
+              <Card isFaceDown />
+              <span className="mt-2 text-sm text-slate-300">Deck: {deck.length}</span>
+            </div>
+            <div className="flex flex-col items-center">
+              <Card card={discardPile[discardPile.length - 1]} />
+              <span className="mt-2 text-sm text-slate-300">Discard: {discardPile.length}</span>
+            </div>
+          </div>
+          
+          <div className="h-12 text-center my-4">
+            <p className={`text-xl font-bold transition-opacity duration-300 ${actionMessage ? 'opacity-100' : 'opacity-0'} ${actionMessage.includes('BUSTED') ? 'text-red-500 animate-pulse' : 'text-yellow-300'}`}>
+              {actionMessage}
+            </p>
+          </div>
+
+          <div className="flex-1 flex flex-col justify-center items-center mb-4 min-h-[200px] sm:min-h-[220px]">
+             <h3 className="text-lg font-semibold mb-2">{currentPlayer?.name}'s Hand</h3>
+              <div className="w-full flex justify-center items-center p-2">
+                <div className="w-full">
+                  {currentPlayer?.hand.length > 0 ? (
+                    <div className="flex flex-wrap justify-center gap-2">
+                      {currentPlayer?.hand.map((card) => (
+                        <div key={card.id} className="transition-transform transform hover:scale-105">
+                           <Card card={card} />
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-slate-400 text-center">Hand is empty.</p>
+                  )}
+                </div>
+              </div>
+          </div>
+
+          <footer className="flex justify-center items-center gap-4 h-16">
+            {gameState === GameState.PlayerTurn && !showNextTurnButton && (
+              <>
+                <button
+                  onClick={handleHit}
+                  disabled={isProcessingAction || currentPlayer?.isBusted || currentPlayer?.isStaying}
+                  className="bg-green-600 hover:bg-green-700 disabled:bg-slate-600 disabled:cursor-not-allowed text-white font-bold py-3 px-8 rounded-lg text-lg transition-transform transform hover:scale-105"
+                >
+                  Hit
+                </button>
+                <button
+                  onClick={handleStay}
+                  disabled={isProcessingAction || currentPlayer?.isBusted || currentPlayer?.isStaying}
+                  className="bg-red-600 hover:bg-red-700 disabled:bg-slate-600 disabled:cursor-not-allowed text-white font-bold py-3 px-8 rounded-lg text-lg transition-transform transform hover:scale-105"
+                >
+                  Stay
+                </button>
+              </>
+            )}
+            {showNextTurnButton && (
+                <button 
+                  onClick={handleNextTurnButtonClick}
+                  className="bg-sky-600 hover:bg-sky-700 text-white font-bold py-3 px-8 rounded-lg text-lg animate-pulse"
+                >
+                  Next Turn
+                </button>
+            )}
+          </footer>
+        </section>
       </div>
+      
+      {gameState === GameState.ActionResolution && <ActionResolver />}
+      
+      {(gameState === GameState.RoundOver || gameState === GameState.GameOver) && (
+        <div className="absolute inset-0 bg-black bg-opacity-70 flex justify-center items-center z-50">
+          <div className="bg-slate-800 p-8 rounded-xl shadow-2xl text-center max-w-lg w-full">
+            {gameState === GameState.GameOver && winner && (
+              <>
+                <h2 className="text-4xl font-bold mb-4 text-yellow-400">Game Over!</h2>
+                <p className="text-2xl mb-6">{winner.name} is the winner with {winner.totalScore} points!</p>
+                <div className="flex justify-center gap-4">
+                  <button onClick={resetGame} className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-lg">New Game</button>
+                </div>
+              </>
+            )}
+            {gameState === GameState.RoundOver && !winner && (
+              <>
+                <h2 className="text-4xl font-bold mb-4 text-sky-400">Round Over</h2>
+                <p className="text-lg mb-6 whitespace-pre-wrap">{roundMessage}</p>
+                 <button onClick={startNewRound} className="bg-green-600 hover:g-green-700 text-white font-bold py-2 px-6 rounded-lg">Start Next Round</button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </main>
   );
 };
